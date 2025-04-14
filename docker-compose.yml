@@ -1,0 +1,98 @@
+version: '3.8'
+
+services:
+  # --- Loki 日志服务 ---
+  loki:
+    image: grafana/loki:2.9.0 # 使用稳定版本
+    container_name: loki_service
+    ports:
+      - "3100:3100" # Loki API 端口
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./loki-config.yaml:/etc/loki/local-config.yaml # 挂载配置文件
+      # - loki_data:/loki # 可选：持久化 Loki 数据
+    networks:
+      # - logging_net # 可选：独立网络
+      - password_cracking_net # 确保其他服务能访问
+      - sniffing_net          # 确保其他服务能访问
+    # profiles: ["logging"] # 可选：如果想按需启动Loki
+
+  # --- Profile: cracking ---
+  xp_simulator:
+    build: ./services/xp_simulator # 指向服务目录
+    container_name: xp_sim
+    volumes:
+      - crack_data:/data
+    networks:
+      - password_cracking_net
+    logging: &loki_logging # 使用 YAML Anchor 简化配置
+      driver: loki
+      options:
+        loki-url: "http://loki:3100/loki/api/v1/push" # 使用服务名访问Loki
+        loki-retries: "5"
+        loki-batch-size: "400"
+    profiles: ["cracking"]
+
+  cracker:
+    build: ./services/cracker
+    container_name: cracker_tool
+    depends_on: [xp_simulator]
+    volumes: [crack_data:/data]
+    networks: [password_cracking_net]
+    logging: *loki_logging # 应用 Loki 日志配置
+    user: "nonroot"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges]
+    profiles: ["cracking"]
+
+  # --- Profile: sniffing ---
+  ftp_server:
+    build: ./services/ftp_server # 或使用 image: fauria/vsftpd:latest
+    container_name: ftp_service
+    environment: # 示例配置
+      FTP_USER: testuser
+      FTP_PASS: testpass
+    networks: [sniffing_net]
+    logging: *loki_logging
+    profiles: ["sniffing"]
+
+  telnet_server:
+    build: ./services/telnet_server
+    container_name: telnet_service
+    networks: [sniffing_net]
+    logging: *loki_logging
+    profiles: ["sniffing"]
+
+  sniffer:
+    build: ./services/sniffer
+    container_name: sniffer_tool
+    depends_on: [ftp_server, telnet_server]
+    volumes: [sniff_data:/pcap]
+    networks: [sniffing_net]
+    logging: *loki_logging
+    user: "nonroot"
+    cap_add: [NET_RAW, NET_ADMIN]
+    security_opt: [no-new-privileges]
+    profiles: ["sniffing"]
+
+  attacker_client:
+    build: ./services/client
+    container_name: attacker_node
+    depends_on: [ftp_server, telnet_server]
+    networks: [sniffing_net]
+    logging: *loki_logging
+    stdin_open: true
+    tty: true
+    profiles: ["sniffing"]
+
+volumes:
+  crack_data:
+  sniff_data:
+  # loki_data: # 如果启用了 Loki 持久化
+
+networks:
+  password_cracking_net:
+    internal: true
+  sniffing_net:
+    internal: true
+  # logging_net: # 如果为 Loki 创建了独立网络
